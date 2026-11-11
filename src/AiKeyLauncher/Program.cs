@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace AiKeyLauncher;
 
 static class Program
@@ -9,7 +11,12 @@ static class Program
         if (!first) return; // already running in the tray
 
         ApplicationConfiguration.Initialize();
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Log.Error("ui thread", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Write($"FATAL: {e.ExceptionObject}");
+        Log.Write($"start v{typeof(Program).Assembly.GetName().Version} on {Environment.OSVersion}");
         Application.Run(new TrayApp());
+        Log.Write("exit");
     }
 }
 
@@ -19,16 +26,24 @@ sealed class TrayApp : ApplicationContext
     readonly Settings _settings = Settings.Load();
     readonly NotifyIcon _tray = new();
     readonly KeyHook _hook;
+    readonly System.Windows.Forms.Timer _watchdog = new() { Interval = 30_000 };
     PickerForm? _picker;
 
     public TrayApp()
     {
+        Providers.Refresh();
         _hook = new KeyHook
         {
             HoldEnabled = () => _settings.HoldOpensPicker,
             HoldDelayMs = () => _settings.HoldDelayMs,
         };
         _hook.Gesture += OnGesture;
+        Log.Write($"hook: {(_hook.IsActive ? "active" : "INACTIVE")}, default={_settings.DefaultProvider}, hold={_settings.HoldOpensPicker}");
+
+        // Windows drops a low-level hook if its callback ever stalls; re-arm it regularly and re-scan apps now and then.
+        int ticks = 0;
+        _watchdog.Tick += (_, _) => { _hook.Reinstall(); if (++ticks % 10 == 0) Providers.Refresh(); };
+        _watchdog.Start();
 
         _tray.Icon = SystemIcons.Application;
         _tray.Visible = true;
@@ -56,7 +71,7 @@ sealed class TrayApp : ApplicationContext
     {
         if (_picker is { IsDisposed: false }) { _picker.Close(); return; }
         _picker = new PickerForm(_settings);
-        _picker.FormClosed += (_, _) => { _picker = null; BuildMenu(); };
+        _picker.FormClosed += (_, _) => { _picker = null; BuildMenu(); Providers.Refresh(); };
         _picker.Show();
     }
 
@@ -90,7 +105,8 @@ sealed class TrayApp : ApplicationContext
         m.Items.Add(startup);
 
         m.Items.Add(new ToolStripSeparator());
-        m.Items.Add("Exit", null, (_, _) => { _hook.Dispose(); _tray.Visible = false; ExitThread(); });
+        m.Items.Add("Open log", null, (_, _) => { try { Process.Start(new ProcessStartInfo(Log.Path) { UseShellExecute = true }); } catch (Exception ex) { Log.Error("open log", ex); } });
+        m.Items.Add("Exit", null, (_, _) => { _watchdog.Stop(); _hook.Dispose(); _tray.Visible = false; ExitThread(); });
         _tray.Text = $"AI Key Launcher — Copilot key opens {Default.Name}";
     }
 }

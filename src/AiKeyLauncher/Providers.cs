@@ -64,22 +64,8 @@ sealed record AiProvider(
         return null;
     }
 
-    string? FindShortcut()
-    {
-        foreach (var folder in new[] { Environment.SpecialFolder.Programs, Environment.SpecialFolder.CommonPrograms })
-        {
-            try
-            {
-                var dir = Environment.GetFolderPath(folder);
-                if (!Directory.Exists(dir)) continue;
-                var hit = Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories)
-                    .FirstOrDefault(f => string.Equals(Path.GetFileNameWithoutExtension(f), Name, StringComparison.OrdinalIgnoreCase));
-                if (hit is not null) return hit;
-            }
-            catch { /* unreadable subfolder */ }
-        }
-        return null;
-    }
+    string? FindShortcut() =>
+        Providers.StartMenuShortcuts().FirstOrDefault(f => string.Equals(Path.GetFileNameWithoutExtension(f), Name, StringComparison.OrdinalIgnoreCase));
 
     public bool HasPackage()
     {
@@ -93,7 +79,13 @@ sealed record AiProvider(
         catch { return false; }
     }
 
-    public bool IsInstalled => FindLaunchTarget() is not null || HasPackage() || (UriScheme is not null && SchemeRegistered(UriScheme));
+    /// <summary>Full detection (slow: disk and registry). Call off the UI thread; see <see cref="Providers.Refresh"/>.</summary>
+    public Detection Detect() => new(FindLaunchTarget(), HasPackage(), UriScheme is not null && SchemeRegistered(UriScheme));
+
+    /// <summary>Cached result of the last <see cref="Providers.Refresh"/>.</summary>
+    public Detection Cached => Providers.Cache.TryGetValue(Id, out var d) ? d : new(null, false, false);
+
+    public bool IsInstalled => Cached.Installed;
 
     static bool SchemeRegistered(string scheme)
     {
@@ -105,28 +97,76 @@ sealed record AiProvider(
         catch { return false; }
     }
 
-    /// <summary>Opens the desktop app if present, otherwise the website in the default browser.</summary>
+    /// <summary>Opens the desktop app if present (per the cache), otherwise the website in the default browser.</summary>
     public void Launch(bool forceWeb = false)
     {
+        var d = Cached;
         if (!forceWeb)
         {
-            var target = FindLaunchTarget();
-            if (target is not null) { Start(target); return; }
-            if (Aumid is not null && HasPackage()) { Start("explorer.exe", $"shell:AppsFolder\\{Aumid}"); return; }
-            if (UriScheme is not null && SchemeRegistered(UriScheme)) { Start(UriScheme); return; }
+            if (d.Target is not null) { Start(d.Target); return; }
+            if (Aumid is not null && d.Package) { Start("explorer.exe", $"shell:AppsFolder\\{Aumid}"); return; }
+            if (UriScheme is not null && d.Scheme) { Start(UriScheme); return; }
         }
         Start(WebUrl);
     }
 
     static void Start(string file, string? args = null)
     {
+        Log.Write($"launch: {file} {args}");
         try { Process.Start(new ProcessStartInfo(file, args ?? "") { UseShellExecute = true }); }
-        catch (Exception ex) { Debug.WriteLine($"Launch failed for {file}: {ex.Message}"); }
+        catch (Exception ex) { Log.Error("launch", ex); }
     }
+}
+
+/// <summary>What detection found for one provider.</summary>
+sealed record Detection(string? Target, bool Package, bool Scheme)
+{
+    public bool Installed => Target is not null || Package || Scheme;
 }
 
 static class Providers
 {
+    internal static volatile Dictionary<string, Detection> Cache = new();
+    static readonly object RefreshGate = new();
+    static List<string>? _shortcuts;
+
+    /// <summary>Re-detects every provider on a worker thread; the UI thread only ever reads the cache.</summary>
+    public static void Refresh(Action? done = null) => ThreadPool.QueueUserWorkItem(_ =>
+    {
+        if (!Monitor.TryEnter(RefreshGate)) return; // one at a time
+        try
+        {
+            _shortcuts = null;
+            var result = new Dictionary<string, Detection>();
+            foreach (var p in All)
+            {
+                try { result[p.Id] = p.Detect(); }
+                catch (Exception ex) { Log.Error($"detect {p.Id}", ex); result[p.Id] = new(null, false, false); }
+            }
+            Cache = result;
+            Log.Write("detect: " + string.Join(", ", result.Select(kv => $"{kv.Key}={(kv.Value.Installed ? kv.Value.Target ?? (kv.Value.Package ? "package" : "scheme") : "web")}")));
+        }
+        finally { Monitor.Exit(RefreshGate); }
+        done?.Invoke();
+    });
+
+    internal static List<string> StartMenuShortcuts()
+    {
+        if (_shortcuts is not null) return _shortcuts;
+        var list = new List<string>();
+        foreach (var folder in new[] { Environment.SpecialFolder.Programs, Environment.SpecialFolder.CommonPrograms })
+        {
+            try
+            {
+                var dir = Environment.GetFolderPath(folder);
+                if (Directory.Exists(dir))
+                    list.AddRange(Directory.EnumerateFiles(dir, "*.lnk", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MaxRecursionDepth = 4 }));
+            }
+            catch (Exception ex) { Log.Error("shortcuts", ex); }
+        }
+        return _shortcuts = list;
+    }
+
     public static readonly AiProvider[] All =
     [
         new("copilot", "Microsoft Copilot",

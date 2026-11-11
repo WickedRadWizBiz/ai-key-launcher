@@ -34,7 +34,7 @@ sealed class KeyHook : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     readonly LowLevelKeyboardProc _proc;
-    readonly IntPtr _hook;
+    IntPtr _hook;
     readonly SynchronizationContext _ui;
     readonly System.Windows.Forms.Timer _tapTimer = new();
 
@@ -52,15 +52,30 @@ sealed class KeyHook : IDisposable
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _proc = Callback;
+        Reinstall();
+        _tapTimer.Tick += (_, _) => { _tapTimer.Stop(); if (_chordPending) { _chordPending = false; Fire(KeyGesture.Tap); } };
+    }
+
+    /// <summary>
+    /// (Re)installs the hook. Windows silently drops a low-level hook whose callback stalls past the
+    /// LowLevelHooksTimeout, so the tray app calls this periodically as a self-heal.
+    /// </summary>
+    public void Reinstall()
+    {
+        if (_hook != IntPtr.Zero) { UnhookWindowsHookEx(_hook); _hook = IntPtr.Zero; }
         using var mod = Process.GetCurrentProcess().MainModule;
         _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(mod?.ModuleName), 0);
-        _tapTimer.Tick += (_, _) => { _tapTimer.Stop(); if (_chordPending) { _chordPending = false; Fire(KeyGesture.Tap); } };
+        if (_hook == IntPtr.Zero) Log.Write($"hook: install FAILED, win32 error {Marshal.GetLastWin32Error()}");
     }
 
     static bool Down(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
     static long Now => Environment.TickCount64;
 
-    void Fire(KeyGesture g) => _ui.Post(_ => Gesture?.Invoke(g), null);
+    void Fire(KeyGesture g)
+    {
+        Log.Write($"gesture: {g}");
+        _ui.Post(_ => { try { Gesture?.Invoke(g); } catch (Exception ex) { Log.Error($"gesture {g}", ex); } }, null);
+    }
 
     IntPtr Callback(int nCode, IntPtr wParam, IntPtr lParam)
     {

@@ -65,18 +65,30 @@ sealed class PickerForm : Form
         FormClosed += (_, _) => RemoveMouseHook();
     }
 
-    // A tray app has no foreground window, so Windows refuses plain Activate(). Borrow the foreground
-    // thread's input queue for the call, which is allowed, so Esc and Deactivate work.
+    // A tray app has no foreground window, so Windows refuses plain Activate(). Sending a synthetic
+    // Alt tap first makes this process the last to receive input, which unlocks SetForegroundWindow.
+    // (The keyboard hook ignores injected events, so this never looks like a gesture.)
     void ForceForeground()
     {
-        var fg = GetForegroundWindow();
-        uint fgThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
-        uint me = GetCurrentThreadId();
-        bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(fgThread, me, true);
-        SetForegroundWindow(Handle);
-        Activate();
-        if (attached) AttachThreadInput(fgThread, me, false);
+        try
+        {
+            var alt = new INPUT[]
+            {
+                new() { type = 1, u = new InputUnion { ki = new KEYBDINPUT { wVk = 0x12 } } },
+                new() { type = 1, u = new InputUnion { ki = new KEYBDINPUT { wVk = 0x12, dwFlags = 2 } } },
+            };
+            SendInput((uint)alt.Length, alt, Marshal.SizeOf<INPUT>());
+            SetForegroundWindow(Handle);
+            Activate();
+        }
+        catch (Exception ex) { Log.Error("foreground", ex); }
     }
+
+    [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] struct InputUnion { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public MOUSEINPUT mi; }
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public InputUnion u; }
+    [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
     // Belt and braces: a click anywhere outside the popup closes it even if activation was refused.
     const int WH_MOUSE_LL = 14, WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204, WM_MBUTTONDOWN = 0x0207;
@@ -106,11 +118,7 @@ sealed class PickerForm : Form
         _mouseProc = null;
     }
 
-    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
     [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
     [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
