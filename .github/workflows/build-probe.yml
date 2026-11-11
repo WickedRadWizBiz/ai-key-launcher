@@ -1,0 +1,28 @@
+name: Build KeyProbe
+
+on:
+  push:
+    branches: [main]
+    paths: ["probe/**", ".github/workflows/build-probe.yml"]
+  pull_request:
+    paths: ["probe/**", ".github/workflows/build-probe.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Publish self-contained single file
+        run: >
+          dotnet publish probe/KeyProbe.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish --nologo -v q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KeyProbe
+          path: publish/KeyProbe.exe
+          if-no-files-found: error
