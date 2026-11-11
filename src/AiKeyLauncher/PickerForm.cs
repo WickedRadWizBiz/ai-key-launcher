@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace AiKeyLauncher;
 
@@ -60,8 +61,60 @@ sealed class PickerForm : Form
 
         Deactivate += (_, _) => Close();
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
-        Shown += (_, _) => Activate();
+        Shown += (_, _) => { ForceForeground(); InstallMouseHook(); };
+        FormClosed += (_, _) => RemoveMouseHook();
     }
+
+    // A tray app has no foreground window, so Windows refuses plain Activate(). Borrow the foreground
+    // thread's input queue for the call, which is allowed, so Esc and Deactivate work.
+    void ForceForeground()
+    {
+        var fg = GetForegroundWindow();
+        uint fgThread = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out _);
+        uint me = GetCurrentThreadId();
+        bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(fgThread, me, true);
+        SetForegroundWindow(Handle);
+        Activate();
+        if (attached) AttachThreadInput(fgThread, me, false);
+    }
+
+    // Belt and braces: a click anywhere outside the popup closes it even if activation was refused.
+    const int WH_MOUSE_LL = 14, WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204, WM_MBUTTONDOWN = 0x0207;
+    delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+    LowLevelMouseProc? _mouseProc;
+    IntPtr _mouseHook;
+
+    void InstallMouseHook()
+    {
+        _mouseProc = (nCode, wParam, lParam) =>
+        {
+            if (nCode >= 0)
+            {
+                int msg = (int)wParam;
+                if (msg is WM_LBUTTONDOWN or WM_RBUTTONDOWN or WM_MBUTTONDOWN && !Bounds.Contains(Cursor.Position))
+                    BeginInvoke(Close);
+            }
+            return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        };
+        using var mod = Process.GetCurrentProcess().MainModule;
+        _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, GetModuleHandle(mod?.ModuleName), 0);
+    }
+
+    void RemoveMouseHook()
+    {
+        if (_mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
+        _mouseProc = null;
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     static Button Button(string text) => new()
     {

@@ -15,4 +15,4 @@ Copilot key launches a chosen AI (Claude/ChatGPT/Gemini/Kimi); Ctrl/Shift/long-h
 - Built-in "Customize Copilot key" setting cannot see the Claude desktop app (not MSIX). Our own MSIX app can be the registered target and route from there, or a low-level hook can catch Win+Shift+F23 first.
 
 ## Next action
-Build src/AiKeyLauncher: hook + chord detection, provider registry, settings, tray menu. Hold gesture ON by default (Steven chose to accept the ~0.5 s tap delay).
+Iterating on Steven's test feedback: hold detection, click-away close, app detection via Start Menu shortcuts + uninstall registry, Copilot as default tap. Claude desktop lives under %LOCALAPPDATA%\Claude on his PC.

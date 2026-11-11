@@ -6,7 +6,7 @@ namespace AiKeyLauncher;
 
 sealed class Settings
 {
-    public string DefaultProvider { get; set; } = "claude";
+    public string DefaultProvider { get; set; } = "copilot";   // a plain tap keeps doing what Windows does until the user picks another
     public bool HoldOpensPicker { get; set; } = true;    // adds ~0.6 s to plain taps when on
     public int HoldDelayMs { get; set; } = 600;
     public bool AlwaysUseWeb { get; set; } = false;
